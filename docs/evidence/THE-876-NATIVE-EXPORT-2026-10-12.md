@@ -4,6 +4,9 @@ Status: PARTIAL / NOT SAFE TO ACCEPT. Original task and downstream acceptance re
 
 Repository: nerdynigel/rgb-lib; branch feat/the-876-transfer-export.
 Registered projectWorkspaceId: 18c352ad-d2a6-499d-921c-f5ce06a00dd9.
+Immutable tested source: b334ca069507fb4bfd10bb84f63b139eb41b8669.
+Draft PR: https://github.com/nerdynigel/rgb-lib/pull/1.
+Source branch remote SHA independently matched via git ls-remote.
 Base: 95332c41fd715939ac6e078ad859d474b1f6fa9b.
 Base tree: 87f030db4819ff5e9b263410885d49f3238c77fa.
 Cwd: /home/nigel/.paperclip/instances/default/projects/3be34d74-08c3-4532-b8b0-2d8f5915387e/7d7a8235-c191-4627-a507-19f9ae24a8ed/rgb-lib/.worktrees/the-876-transfer-export.
@@ -37,7 +40,13 @@ Commands use /home/nigel/.cargo/bin/cargo (Rust/Cargo 1.98.1); no dependency pin
 - cargo test --locked --offline readonly_runtime --lib: 2 PASS, 0 failed. Isolated empty Stock
   fixture; not second live stock, funded wallet, actual export, interruption or crash proof.
 - Earlier test compilation errors in synthetic fixture constructors were corrected before PASS.
-- Final formatting/diff/check results and exact delivered SHA/PR are recorded in the issue receipt.
+- Final default cargo check --locked --offline PASS; no-default check PASS; format/diff PASS.
+- git push origin feat/the-876-transfer-export succeeded; git ls-remote matched the immutable
+  tested source above. Draft PR1 opened against the existing snapshot branch dev; no upstream
+  fetch/tracking or merge was introduced. Terminal issue receipt records the documentation
+  delivery commit and independently verified OPEN/DRAFT PR head.
+- Initial commit command lacked an author identity and failed before committing; corrected with
+  per-command Paperclip name/email and required co-author trailer, without global config changes.
 
 No financial profiles, browser SDK initialization, wallet issuance, signing, funding, Core,
 indexer, runtime recipe release, old-case replay, WASM/default/native RLN/signer/production pin,
