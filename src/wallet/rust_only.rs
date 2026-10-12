@@ -25,6 +25,44 @@ pub struct ColoringInfo {
     pub nonce: Option<u64>,
 }
 
+/// Preserve input/output PSBT metadata when inserting a commitment host. Returns whether vouts
+/// in the caller's pre-coloring map must shift by one.
+pub(crate) fn prepare_commitment_output(psbt: &mut Psbt) -> Result<bool, Error> {
+    let mut transaction = match psbt.clone().extract_tx() {
+        Ok(tx) => tx,
+        Err(ExtractTxError::MissingInputValue { tx }) => tx, // required for non-standard TXs
+        Err(e) => return Err(InternalError::from(e).into()),
+    };
+    let mut opreturn_first = false;
+    if transaction.output.iter().any(|o| o.script_pubkey.is_p2tr()) {
+        opreturn_first = true;
+    }
+
+    let mut inserted_opreturn_first = false;
+    if !transaction
+        .output
+        .iter()
+        .any(|o| o.script_pubkey.is_op_return())
+    {
+        let opreturn_output = TxOut {
+            value: BdkAmount::ZERO,
+            script_pubkey: ScriptBuf::new_op_return([]),
+        };
+        if opreturn_first {
+            transaction.output.insert(0, opreturn_output);
+            psbt.outputs.insert(0, Default::default());
+            inserted_opreturn_first = true;
+        } else {
+            transaction.output.push(opreturn_output);
+            psbt.outputs.push(Default::default());
+        }
+        // Preserve authenticated input data and all unrelated PSBT metadata.
+        psbt.unsigned_tx = transaction;
+    }
+
+    Ok(inserted_opreturn_first)
+}
+
 /// Result of importing an RGB contract without receiving asset allocations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportAssetContractResult {
@@ -368,35 +406,18 @@ impl Wallet {
         psbt: &mut Psbt,
         coloring_info: ColoringInfo,
     ) -> Result<(Fascia, AssetBeneficiariesMap), Error> {
-        info!(self.logger(), "Coloring PSBT...");
-        let mut transaction = match psbt.clone().extract_tx() {
-            Ok(tx) => tx,
-            Err(ExtractTxError::MissingInputValue { tx }) => tx, // required for non-standard TXs
-            Err(e) => return Err(InternalError::from(e).into()),
-        };
-        let mut opreturn_first = false;
-        if transaction.output.iter().any(|o| o.script_pubkey.is_p2tr()) {
-            opreturn_first = true;
-        }
-
-        if !transaction
-            .output
-            .iter()
-            .any(|o| o.script_pubkey.is_op_return())
-        {
-            let opreturn_output = TxOut {
-                value: BdkAmount::ZERO,
-                script_pubkey: ScriptBuf::new_op_return([]),
-            };
-            if opreturn_first {
-                transaction.output.insert(0, opreturn_output);
-            } else {
-                transaction.output.push(opreturn_output);
-            }
-            *psbt = Psbt::from_unsigned_tx(transaction).unwrap();
-        }
-
         let runtime = self.rgb_runtime()?;
+        self.color_psbt_with_runtime(psbt, coloring_info, &runtime)
+    }
+
+    pub(crate) fn color_psbt_with_runtime(
+        &self,
+        psbt: &mut Psbt,
+        coloring_info: ColoringInfo,
+        runtime: &RgbRuntime,
+    ) -> Result<(Fascia, AssetBeneficiariesMap), Error> {
+        info!(self.logger(), "Coloring PSBT...");
+        let inserted_opreturn_first = prepare_commitment_output(psbt)?;
 
         let prev_outputs = psbt
             .unsigned_tx
@@ -438,11 +459,11 @@ impl Wallet {
                 if amount == 0 {
                     continue;
                 }
-                if opreturn_first {
+                if inserted_opreturn_first {
                     vout += 1;
                 }
                 sending_amt += amount;
-                if vout as usize > psbt.outputs.len() {
+                if vout as usize >= psbt.outputs.len() {
                     return Err(Error::InvalidColoringInfo {
                         details: s!("invalid vout in output_map, does not exist in the given PSBT"),
                     });

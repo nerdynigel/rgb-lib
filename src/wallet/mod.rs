@@ -15,6 +15,8 @@ pub(crate) mod objects;
 pub(crate) mod offline;
 #[cfg(any(feature = "electrum", feature = "esplora"))]
 pub(crate) mod online;
+/// Non-consuming, approval-bound prospective transfer exports.
+pub mod prospective;
 pub mod rust_only;
 pub(crate) mod singlesig;
 #[cfg(feature = "vss")]

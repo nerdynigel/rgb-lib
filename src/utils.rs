@@ -759,9 +759,19 @@ pub struct RgbRuntime {
     wallet_dir: PathBuf,
     /// Whether dropping the runtime should persist the in-memory stock.
     persist_on_drop: bool,
+    /// Read-only callers release explicitly so unlock failures are observable.
+    lock_held: bool,
+    readonly: bool,
 }
 
 impl RgbRuntime {
+    pub(crate) fn release_readonly(mut self) -> Result<(), Error> {
+        debug_assert!(self.readonly);
+        self.lock_held = false;
+        fs::remove_file(self.wallet_dir.join(RGB_RUNTIME_LOCK_FILE))?;
+        Ok(())
+    }
+
     /// Opt out of the legacy drop-time persistence path for a mutation whose errors must be
     /// observable by the caller.
     #[cfg(any(feature = "electrum", feature = "esplora"))]
@@ -1018,8 +1028,14 @@ impl Drop for RgbRuntime {
         if self.persist_on_drop {
             self.stock.store().expect("unable to save stock");
         }
-        fs::remove_file(self.wallet_dir.join(RGB_RUNTIME_LOCK_FILE))
-            .expect("should be able to drop lockfile")
+        if self.lock_held {
+            let result = fs::remove_file(self.wallet_dir.join(RGB_RUNTIME_LOCK_FILE));
+            if !self.readonly {
+                result.expect("should be able to drop lockfile");
+            }
+            // Read-only errors unwind without panicking or writing stock. Successful calls
+            // use release_readonly to return any unlock error to the caller.
+        }
     }
 }
 
@@ -1077,7 +1093,47 @@ pub(crate) fn load_rgb_runtime<P: AsRef<Path>>(wallet_dir: P) -> Result<RgbRunti
         stock,
         wallet_dir: wallet_dir.as_ref().to_path_buf(),
         persist_on_drop: true,
+        lock_held: true,
+        readonly: false,
     })
+}
+
+/// Release the lock explicitly on both success and refusal; report cleanup errors.
+pub(crate) fn with_rgb_runtime_readonly<T>(
+    wallet_dir: &Path,
+    action: impl FnOnce(&RgbRuntime) -> Result<T, Error>,
+) -> Result<T, Error> {
+    let runtime = load_rgb_runtime_readonly(wallet_dir)?;
+    let result = action(&runtime);
+    runtime.release_readonly()?;
+    result
+}
+
+/// Load only existing state under the usual wallet lock, without initialization or drop writes.
+pub(crate) fn load_rgb_runtime_readonly(wallet_dir: &Path) -> Result<RgbRuntime, Error> {
+    write_rgb_runtime_lockfile(wallet_dir)?;
+    let result = (|| {
+        let rgb_dir = wallet_dir.join(RGB_RUNTIME_DIR);
+        let provider = FsBinStore {
+            stash: rgb_dir.join("stash.dat"),
+            state: rgb_dir.join("state.dat"),
+            index: rgb_dir.join("index.dat"),
+        };
+        let stock = Stock::load(provider, false).map_err(|e| Error::IO {
+            details: e.to_string(),
+        })?;
+        Ok(RgbRuntime {
+            stock,
+            wallet_dir: wallet_dir.to_path_buf(),
+            persist_on_drop: false,
+            lock_held: true,
+            readonly: true,
+        })
+    })();
+    if result.is_err() {
+        fs::remove_file(wallet_dir.join(RGB_RUNTIME_LOCK_FILE))?;
+    }
+    result
 }
 
 #[cfg(any(feature = "electrum", feature = "esplora"))]
@@ -1227,6 +1283,67 @@ mod tests {
         let result = check_proxy(&server.url());
         assert_matches!(result, Err(Error::Proxy { details }) if details == "method not found");
         mock.assert();
+    }
+
+    #[test]
+    fn readonly_runtime_initialization_refused_without_stock_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(load_rgb_runtime_readonly(dir.path()).is_err());
+        assert!(!dir.path().join(RGB_RUNTIME_DIR).exists());
+        assert!(!dir.path().join(RGB_RUNTIME_LOCK_FILE).exists());
+    }
+
+    #[test]
+    fn readonly_runtime_lock_drop_release_and_error_preserve_stock() {
+        let dir = tempfile::tempdir().unwrap();
+        // Isolated empty engine store fixture, not an issued/funded wallet or second live stock.
+        drop(load_rgb_runtime(dir.path()).unwrap());
+        let rgb_dir = dir.path().join(RGB_RUNTIME_DIR);
+        let snapshot = || {
+            ["stash.dat", "state.dat", "index.dat"].map(|name| {
+                let path = rgb_dir.join(name);
+                (
+                    fs::read(&path).unwrap(),
+                    fs::metadata(path).unwrap().modified().unwrap(),
+                )
+            })
+        };
+        let before = snapshot();
+        let runtime = load_rgb_runtime_readonly(dir.path()).unwrap();
+        assert!(dir.path().join(RGB_RUNTIME_LOCK_FILE).exists());
+        assert!(
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(dir.path().join(RGB_RUNTIME_LOCK_FILE))
+                .is_err()
+        );
+        assert_eq!(snapshot(), before);
+        drop(runtime);
+        assert!(!dir.path().join(RGB_RUNTIME_LOCK_FILE).exists());
+        assert_eq!(snapshot(), before);
+        load_rgb_runtime_readonly(dir.path())
+            .unwrap()
+            .release_readonly()
+            .unwrap();
+        assert_eq!(snapshot(), before);
+        let runtime = load_rgb_runtime_readonly(dir.path()).unwrap();
+        fs::remove_file(dir.path().join(RGB_RUNTIME_LOCK_FILE)).unwrap();
+        assert!(runtime.release_readonly().is_err());
+        assert_eq!(snapshot(), before);
+        let result: Result<(), Error> = with_rgb_runtime_readonly(dir.path(), |_| {
+            Err(Error::RgbInspection {
+                details: "synthetic construction refusal".into(),
+            })
+        });
+        assert!(result.is_err());
+        assert!(!dir.path().join(RGB_RUNTIME_LOCK_FILE).exists());
+        assert_eq!(snapshot(), before);
+        fs::write(rgb_dir.join("stash.dat"), b"corrupt fixture").unwrap();
+        let corrupt = snapshot();
+        assert!(load_rgb_runtime_readonly(dir.path()).is_err());
+        assert!(!dir.path().join(RGB_RUNTIME_LOCK_FILE).exists());
+        assert_eq!(snapshot(), corrupt);
     }
 
     #[test]
